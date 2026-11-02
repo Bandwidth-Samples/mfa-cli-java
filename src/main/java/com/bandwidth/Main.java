@@ -1,145 +1,96 @@
 package com.bandwidth;
 
-import com.bandwidth.sdk.ApiResponse;
-import com.bandwidth.sdk.ApiException;
 import com.bandwidth.sdk.ApiClient;
-import com.bandwidth.sdk.auth.HttpBasicAuth;
-import com.bandwidth.sdk.model.*;
-import com.bandwidth.sdk.api.*;
-import com.bandwidth.sdk.Configuration;
+import com.bandwidth.sdk.api.MfaApi;
+import com.bandwidth.sdk.model.CodeRequest;
+import com.bandwidth.sdk.model.VerifyCodeRequest;
 
-import java.math.BigDecimal;
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.util.Scanner;
+import java.math.BigDecimal;
 
 public class Main {
 
-    private static final String username = System.getenv("BW_USERNAME");
-    private static final String password = System.getenv("BW_PASSWORD");
-    private static final String accountId = System.getenv("BW_ACCOUNT_ID");
-    private static final String voiceApplicationId = System.getenv("BW_VOICE_APPLICATION_ID");
-    private static final String messagingApplicationId = System.getenv("BW_MESSAGING_APPLICATION_ID");
-    private static final String bandwidthNumber = System.getenv("BW_NUMBER");
+    private static final String SCOPE = "sample";
 
-    public static ApiClient defaultClient = Configuration.getDefaultApiClient();
-    public static HttpBasicAuth Basic = (HttpBasicAuth) defaultClient.getAuthentication("Basic");
-    public static MfaApi api = new MfaApi(defaultClient);
+    private static final BufferedReader stdin = new BufferedReader(new InputStreamReader(System.in));
+
+    private static String prompt(String text) throws IOException {
+        System.out.print(text);
+        System.out.flush();
+        String line = stdin.readLine();
+        if (line == null) {
+            System.exit(1);
+        }
+        return line.strip();
+    }
 
     public static void main(String[] args) throws IOException {
-
-        CodeRequest request = new CodeRequest();
-        Scanner scanner = new Scanner(new InputStreamReader(System.in));
-
-        System.out.println("Send the code to the following phone number (E164 format: +13330004444): ");
-        String toNumber = scanner.nextLine();
-
-        System.out.println("Text or Voice? ");
-        String option = scanner.nextLine();
-
-        boolean success;
-        String applicationId = null;
-        if ("text".equalsIgnoreCase(option)) {
-            success = sendMessageCode(toNumber);
-        } else if ("voice".equalsIgnoreCase(option)) {
-            success = sendVoiceCode(toNumber);
-        } else {
-            System.out.println("Must be 'Voice' or 'text'");
-            return;
+        String accountId = System.getenv("BW_ACCOUNT_ID");
+        String clientId = System.getenv("BW_CLIENT_ID");
+        String clientSecret = System.getenv("BW_CLIENT_SECRET");
+        String number = System.getenv("BW_NUMBER");
+        String voiceApplicationId = System.getenv("BW_VOICE_APPLICATION_ID");
+        String messagingApplicationId = System.getenv("BW_MESSAGING_APPLICATION_ID");
+        if (accountId == null || clientId == null || clientSecret == null || number == null
+                || voiceApplicationId == null || messagingApplicationId == null) {
+            System.err.println("Please set the environmental variables defined in the README");
+            System.exit(1);
         }
 
-        if (!success) {
-            System.out.println("There was an error during code creation.");
-            return;
+        MfaApi mfaApi = new MfaApi(new ApiClient(clientId, clientSecret, null));
+
+        String phoneNumber = prompt("Enter the phone number to send the code to (E.164, e.g. +15554443333): ");
+        if (!phoneNumber.matches("\\+[1-9]\\d{1,14}")) {
+            System.err.println("Phone number must be in E.164 format, e.g. +15554443333");
+            System.exit(1);
         }
 
-        System.out.println("What is the Code? ");
-        String code = scanner.nextLine();
+        String method = prompt("Send the code by messaging or voice? [messaging]: ").toLowerCase();
+        if (method.isEmpty()) {
+            method = "messaging";
+        }
+        if (!method.equals("messaging") && !method.equals("voice")) {
+            System.err.println("Method must be messaging or voice");
+            System.exit(1);
+        }
 
-        BigDecimal expirationTime = new BigDecimal(3);
+        CodeRequest codeRequest = new CodeRequest()
+                .to(phoneNumber)
+                .from(number)
+                .applicationId(method.equals("voice") ? voiceApplicationId : messagingApplicationId)
+                .scope(SCOPE)
+                .message("Your temporary {NAME} {SCOPE} code is {CODE}")
+                .digits(6);
 
-        VerifyCodeRequest verifyRequest = new VerifyCodeRequest();
-	verifyRequest.setCode(code);
-	verifyRequest.setTo(toNumber);
-	verifyRequest.setScope("mfa");
-	verifyRequest.setExpirationTimeInMinutes(expirationTime);
-        ApiResponse<VerifyCodeResponse> response = null; 
+        System.out.println("Sending a code by " + method + " to " + phoneNumber);
         try {
-            response = api.verifyCodeWithHttpInfo(accountId, verifyRequest);
-
-        } catch (ApiException e) {
-            System.out.println(e.getMessage());
-            return;
+            if (method.equals("voice")) {
+                mfaApi.generateVoiceCode(accountId, codeRequest);
+            } else {
+                mfaApi.generateMessagingCode(accountId, codeRequest);
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to send code: " + e.getMessage());
+            System.exit(1);
         }
 
-        if (Boolean.TRUE.equals(response.getData().getValid())) {
-            System.out.println("Valid Code!");
-        } else {
-            System.out.println("Invalid Code");
-        }
+        VerifyCodeRequest verifyRequest = new VerifyCodeRequest()
+                .to(phoneNumber)
+                .scope(SCOPE)
+                .expirationTimeInMinutes(new BigDecimal(3))
+                .code(prompt("Enter the code you received: "));
 
-	scanner.close();
-	return;
-    }
-
-    public static boolean sendMessageCode(String toNumber) throws IOException {
-
-	Basic.setUsername(username);
-	Basic.setPassword(password);
-        ApiResponse<MessagingCodeResponse> response = null;
-        CodeRequest request = new CodeRequest();
-        request.setTo(toNumber);
-        request.setFrom(bandwidthNumber);
-        request.setApplicationId(messagingApplicationId);
-        request.setScope("mfa");
-        request.setMessage("Your temporary {NAME} {SCOPE} code is {CODE}");
-        request.setDigits(5);
-
+        boolean valid = false;
         try {
-	    response = api.generateMessagingCodeWithHttpInfo(accountId, request);
-        } catch (ApiException e) {
-            System.out.println(e.getMessage());
-            return false;
+            valid = Boolean.TRUE.equals(mfaApi.verifyCode(accountId, verifyRequest).getValid());
+        } catch (Exception e) {
+            System.err.println("Failed to verify code: " + e.getMessage());
+            System.exit(1);
         }
 
-        if (response == null ) {
-            System.out.println("Response was null");
-            return false;
-        }
-
-        return true;
+        System.out.println(valid ? "Code verified" : "Code not verified");
+        System.exit(valid ? 0 : 1);
     }
-
-    public static boolean sendVoiceCode(String toNumber) throws IOException {
-
-	Basic.setUsername(username);
-	Basic.setPassword(password);
-        ApiResponse<VoiceCodeResponse> response = null; 
-        CodeRequest request = new CodeRequest();
-        request.setTo(toNumber);
-        request.setFrom(bandwidthNumber);
-        request.setApplicationId(voiceApplicationId);
-        request.setScope("mfa");
-        request.setMessage("This is your {CODE}");
-        request.setDigits(5);
-
-        try {
-            response = api.generateVoiceCodeWithHttpInfo(accountId, request);
-        } catch (ApiException e) {
-            System.out.println(e.getMessage());
-            return false;
-        }
-
-        if (response == null ) {
-            System.out.println("Response was null");
-            return false;
-        }
-
-        return true;
-    }
-
-
-
-
-
 }
